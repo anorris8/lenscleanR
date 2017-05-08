@@ -1,0 +1,466 @@
+---
+title: "LensCleanR"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: bootstrap
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+## Note tibble and bioconductor don't play nicely together
+## Load data in 'global' chunk so it can be shared by all users of the dashboard
+library(flexdashboard)
+library(shiny)
+library(shinyBS)
+library(monocle)
+library(HSMMSingleCell)
+library(knitr)
+library(plyr)
+library(Matrix)
+library(ggplot2)
+library(reshape2)
+library(Biobase)
+library(data.table)
+library(plotly)
+options(shiny.maxRequestSize = 100*1024^2)
+
+#### Colors
+cbs4qual = c("#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C")
+cbs4dive = c("#CA0020", "#F4A582", "#92C5DE", "#0571B0")
+tol21rainbow= c("#771155", "#AA4488", "#CC99BB", "#114477", "#4477AA", "#77AADD", "#117777", "#44AAAA", "#77CCCC", "#117744", "#44AA77", "#88CCAA", "#777711", "#AAAA44", "#DDDD77", "#774411", "#AA7744", "#DDAA77", "#771122", "#AA4455", "#DD7788")
+
+
+#### Load example data ahead of time
+data("HSMM_expr_matrix", "HSMM_gene_annotation", "HSMM_sample_sheet")
+example_hsmm <- newCellDataSet(
+  as.matrix(HSMM_expr_matrix), 
+  new("AnnotatedDataFrame", data = HSMM_sample_sheet),
+  new("AnnotatedDataFrame", data = HSMM_gene_annotation),
+  lowerDetectionLimit = 0.1,
+  expressionFamily = negbinomial())
+
+## Lung
+extPath <- file.path(system.file(package = "monocle"), "extdata")
+load(file.path(extPath, "lung_phenotype_data.RData"))
+load(file.path(extPath, "lung_exprs_data.RData"))
+load(file.path(extPath, "lung_feature_data.RData"))
+example_lung <- newCellDataSet(
+  lung_exprs_data[ , rownames(lung_phenotype_data)], 
+  new("AnnotatedDataFrame", data = lung_phenotype_data),
+  new("AnnotatedDataFrame", data = lung_feature_data),
+  lowerDetectionLimit = 1,
+  expressionFamily = negbinomial.size())
+
+cds <- example_hsmm
+
+### Reactive values
+saved_values <- reactiveValues()
+saved_values$cds <- example_hsmm
+```
+
+Load
+=====================================  
+
+```{r}
+### Choose dataset
+selectInput("dataset", "Choose dataset:",
+            c("hsmm" = "hsmm",
+              "lung" = "lung",
+              "upload" = "upload"))
+actionButton("go_load_data", "Load & Preview Data")
+```
+```{r}
+### Load data
+reactive({
+  
+  if (input$dataset == "hsmm") {
+    
+    ### HSMM example dataset
+    dat <- example_hsmm
+
+  } else if (input$dataset == "lung") {
+      
+    ### Lung example dataset
+    dat <- example_lung
+
+  } else if (input$dataset == "upload") {
+  
+    ### User data
+    pd_user <- reactive({
+      pheno <- input$phenoUser
+      if (is.null(pheno)) {return(NULL)}
+      read.csv(pheno$datapath, header = TRUE)
+      })
+    fd_user <- reactive({
+      feature <- input$featureUser
+      if (is.null(feature)) {return(NULL)}
+      read.csv(feature$datapath, header = TRUE)
+      })
+    exprs_user <- reactive({
+      exprs <- input$exprsUser
+      if (is.null(matrix)) 
+        return(NULL)
+      read.csv(matrix$datapath, header = TRUE)
+    })
+    dat <- newCellDataSet(exprs_user, 
+                          new("AnnotatedDataFrame", data = pd_user),
+                          new("AnnotatedDataFrame", data = fd_user),
+                          lowerDetectionLimit = 1, 
+                          expressionFamily = negbinomial.size())
+  }
+  ### Estimate size factors and estimate dispersions
+  dat <- estimateSizeFactors(dat)
+  dat <- estimateDispersions(dat)
+  
+  ### Add total mRNA for each cell (to identify cells with low RNA or doublets)
+  pData(dat)$mRNA <- Matrix::colSums(exprs(dat))
+  
+  ### Save data
+  saved_values$cds <- dat
+})
+
+observeEvent(input$go_load_data, {
+  dat <- saved_values$cds
+
+  ### Preview pheno Data
+  output$table_pd_preview <- renderDataTable(
+    data.frame(Biobase::pData(dat))
+    )
+  
+  ### Preview feature Data
+  if (is.null(dat$num_cells_expressed)) {
+    dat <- detectGenes(dat, min_expr = 0.1)
+  }
+  fdat <- Biobase::fData(dat)
+  output$plot_fd_preview <- renderPlot(
+    ggplot(fdat, aes(x = num_cells_expressed, group = biotype)) + 
+    geom_histogram(aes(color = biotype, fill = biotype), bins = 50, alpha = 0.1) + 
+    theme_bw() +
+    scale_color_manual(values = tol21rainbow[1:length(levels(fdat$biotype))]) +
+    scale_fill_manual(values = tol21rainbow[1:length(levels(fdat$biotype))]) 
+  )
+})
+```
+
+Column {.tabset}
+-------------------------------------
+
+### Features
+```{r }
+plotOutput("plot_fd_preview")
+```
+
+
+### Pheno
+```{r}
+dataTableOutput("table_pd_preview")
+```
+
+
+QC
+===================================== 
+
+```{r}
+### Filter features: exclude genes expressed in few if any cells so as not to waste CPU time analyzing them for differential expression
+observeEvent(input$go_filter_features, {
+  dat <- saved_values$cds
+
+  ### FIRST: Set min value for a feature to be considered expressed.
+  dat <- detectGenes(dat, min_expr = input$min_expr)
+
+  ### SECOND: Set min number of cells for feature to be expressed in.
+  expressed_genes <- rownames(subset(Biobase::fData(dat), num_cells_expressed >= input$min_cells))
+
+  ### Tabulate of # features by # cells expressing it
+  table_num_cells_expr <- data.frame(table(Biobase::fData(dat)$num_cells_expr))
+  table_num_cells_expr <- table_num_cells_expr[order(table_num_cells_expr$Var1, decreasing = TRUE), ]
+  table_num_cells_expr$Var1 <- as.integer(table_num_cells_expr$Var1)
+  rownames(table_num_cells_expr) <- NULL
+  
+  ### Plot
+  plot_num_cells_expr <- ggplot(table_num_cells_expr, aes(x = Var1, y = Freq)) + 
+      geom_bar(stat = "identity") +
+      geom_vline(xintercept = input$min_cells, color = cbs4dive[1], lwd = 1.25) + 
+      theme_bw() +
+      labs(x = "Number of cells expressing feature", 
+           y = "Features (n)")
+  output$plot_num_cells_expr <- renderPlot(plot_num_cells_expr)
+})
+```
+```{r}
+### Filter cells: restrict to singlet cells by removing doublets/triplets and cell debris
+observe({
+  dat <- saved_values$cds
+  pData(dat)$mRNA <- Matrix::colSums(exprs(dat))
+  
+  if(is.null(input$mRNA_SD)) {
+    return()
+  }
+  ### Add total mRNA for each cell (to identify cells with low RNA or doublets)
+  upper <- 10^(mean(log10(pData(dat)$mRNA)) + input$mRNA_SD*sd(log10(pData(dat)$mRNA)))
+  lower <- 10^(mean(log10(pData(dat)$mRNA)) - input$mRNA_SD*sd(log10(pData(dat)$mRNA)))
+
+  ### Tabulate cell types 
+  mRNA <- pData(dat)$mRNA
+  names(mRNA) <- rownames(pData(dat))
+  debris <- mRNA[mRNA < lower]
+  valid_cells <- mRNA[mRNA > lower & mRNA < upper]
+  doublet <- mRNA[mRNA > upper]
+  table_mRNA_filtered <- rbind.data.frame("Total" = length(mRNA), 
+          "Singlets" = length(valid_cells),
+          "Doublets [filtered]" = length(double),
+          "Debris [filtered]" = length(debris))
+  names(table_mRNA_filtered) <- "Number of Cells"
+  saved_values$table_mRNA_filtered <- table_mRNA_filtered
+    
+  ### Add Singlet (valid_cells) column to pData, for plotting/filtering
+  pData(dat)$valid_cells <- ifelse(rownames(pData(dat)) %in% names(valid_cells), TRUE, FALSE)
+  
+  ### Plot cell total mRNA distribution
+  pdat <- pData(dat)
+  saved_values$plot_mRNA_log <- ggplot(
+    pdat, aes(x = mRNA/1E06, color = valid_cells, fill = valid_cells)) + 
+    geom_density(alpha = 0.2) +
+    geom_vline(xintercept = lower/1E06, lwd = 1.2) + 
+    geom_vline(xintercept = upper/1E06, lwd = 1.2) +
+    theme_bw() +
+    scale_color_manual(values = cbs4dive[c(1,4)]) +
+    scale_fill_manual(values = cbs4dive[c(1,4)]) +
+    labs(x = "Total mRNA of Cell (Millions)", y = "Density",
+         title = "Total mRNA Distribution (unfiltered)")
+  
+  ### Save
+  saved_values$cds <- dat
+})
+
+output$table_mRNA_filtered <- renderTable(saved_values$table_mRNA_filtered)
+output$plot_mRNA_log <- renderPlot(saved_values$plot_mRNA_log)
+
+observeEvent(input$go_filter_cells, {
+  dat <- saved_values$cds
+  
+  ### Filter cell samples
+  dat <- dat[ , rownames(subset(pData(dat), valid_cells == TRUE))]
+  dat <- detectGenes(dat, min_expr = input$min_expr)
+
+  ### Plot filtered results (log-transformed)
+  L <- log(exprs(dat[saved_values$expressed_genes, ]))
+  if(is.null(dim(L))) { 
+    return() 
+  }
+  mRNA_log <- melt(Matrix::t(scale(Matrix::t(L))))
+  saved_values$plot_mRNA_log <- ggplot(
+      mRNA_log, aes(x = value))
+      geom_density() + 
+      stat_function(fun = dnorm, size = 0.5) +
+      theme_bw() +
+      labs(x = "Standardized log(FPKM)", y = "Density", 
+           title = "Total mRNA: Lognormal distribution (filtered)")
+  
+  ### Save
+  saved_values$cds_filt <- dat
+})
+
+output$plot_mRNA_log <- renderPlot(saved_values$plot_mRNA_log)
+```
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+### Minimum expression value
+sliderInput("min_expr", "Min. expression value of feature",
+            min = 0, max = 10, step = 0.01, value = 0.1)
+
+### Minimum number of cells
+sliderInput("min_cells", "Min. number of cells expressing feature",
+            min = 0, max = 100, step = 1, value = 10)
+
+### Filter features
+actionButton("go_filter_features", "Filter features [in progress]")
+
+### Filter: Remove doublets and debris-cells (keep singlets only)
+sliderInput("mRNA_SD", "Number of SDs from mean Total mRNA for singlet cell cutoff",
+             min = 0, max = 5, step = 0.25, value = 2)
+### Submit
+actionButton("go_filter_cells", "Filter cells")
+```
+
+Column {.tabset}
+-------------------------------------
+
+### Filter features
+
+```{r}
+### Histogram of cells expressing feature based on min_expr
+plotOutput("plot_num_cells_expr")
+```
+
+
+### Filter cells
+
+```{r}
+### Plot
+plotOutput("plot_mRNA")
+dataTableOutput("table_mRNA_filtered")
+plotOutput("plot_mRNA_log")
+```
+
+
+Exploratory [in progress]
+===================================== 
+
+```{r eval=FALSE}
+### Select column in table -> show details in inputs
+observeEvent(input$level_x, {
+  if (is.null(input$level_x)) 
+    level_xvar <- "select data level to filter"
+  
+  if (input$level_x == "fData")
+    level_xvar <- colnames(fData(saved_values$cds))
+  
+  else (input$level_x == "pData")
+    level_xvar <- colnames(pData(saved_values$cds))
+  
+    updateSelectInput(session, "level_x", choices = level_xvar)
+})
+
+observeEvent(input$level_y, {
+  if (is.null(input$level_y)) 
+    level_yvar <- "select data type to filter"
+  
+  if (input$level_y == "fData")
+    level_yvar <- colnames(fData(saved_values$cds))
+  
+  else (input$level_y == "pData")
+    level_yvar <- colnames(pData(saved_values$cds))
+  
+    updateSelectInput(session, "level_y", choices = level_yvar)
+})
+
+### Plot
+observeEvent(input$go_plot_exporatory, {
+  dat <- Biobase::pData(saved_values$cds_filt)
+  updateSelectizeInput(session, "select_genes", 
+                       choices = fData(saved_values$cds_filt)$gene_short_name, 
+                       server = TRUE)
+  if (!is.null(input$genes)) {
+    output$plot <- renderPlot(
+      qplot(input$level_xvar, input$level_yvar, data = dat, color = input$genes))
+  } else 
+    output$plot <- renderPlot(
+      qplot(input$level_xvar, input$level_yvar, data = dat))
+
+  output$plot_clickinfo <- renderPrint({
+    cat("Click:\n")
+    str(input$plot_click)
+    })
+
+  output$plot_hoverinfo <- renderPrint({
+    cat("Hover (viewpoints):\n")
+    str(input$plot_hover)
+  })
+
+  output$plot_brushinfo <- renderPrint({
+    cat("Brush (debounced):\n")
+    str(input$plot_brush)
+  })
+})
+
+#### THESE AREN'T WORKING!! ####
+
+
+#### Warning: Error in [: object of type 'environment' is not subsettable
+output$plot_clickedpoints <- renderTable({
+  res <- nearPoints(saved_values$plot_dat, input$plot_click, 
+                    xvar = input$level_xvar, yvar = input$level_yvar)
+  if (nrow(res) == 0)
+    return()
+  res
+})
+
+#### ?Error
+output$plot_brushedpoints <- renderTable({
+  res <- brushedPoints(saved_values$plot_dat, input$plot_brush, allRows = TRUE)
+  if (nrow(res) == 0)
+    return()
+  res  
+})
+
+#### Download brushed data as .csv
+output$download_brushedpoints <- downloadHandler(
+  filename = function() paste0('BrushedPoints', Sys.Date(), Sys.time(), '.csv', sep = '_'),
+  content = function(file) write.csv(data(), file))
+```
+
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+### Choose data levels to plot
+selectInput("level_x", "Choose data level to plot on x-axis:",
+            c("fData" = "fData", "pData" = "pData"))
+selectInput("level_y", "Choose 2nd data level to plot on y-axis:",
+            c("fData" = "fData", "pData" = "pData"))
+
+### Choose variables to plot
+selectInput("level_xvar", "Choose variable to plot on x-axis:", NULL)
+selectInput("level_yvar", "Choose variable to plot on y-axis:", NULL)
+
+### Choose gene(s) to highlight
+selectizeInput("select_genes", "Gene symbol", choices = NULL, options = list(placeholder = "select a gene")) 
+### Action button to plot
+actionButton("go_plot_exporatory", "Plot")
+
+### Download brushed samples
+downloadButton("download_brushedpoints", "Download Brushed Points")
+```
+
+Row {row-height=400}
+-------------------------------------
+
+Column {column-width=300}
+-------------------------------------
+
+```{r eval=FALSE}
+### Plot
+plotOutput("plot", height = 500,
+           click = "plot_click",
+           hover = hoverOpts(id = "plot_hover", delayType = "throttle"),
+           brush = brushOpts(id = "plot_brush"))
+```
+
+Column {column-width=100}
+-------------------------------------
+
+```{r eval=FALSE}
+### Plot: brush info.
+wellPanel(actionButton("go_newplot", "Launch"))
+verbatimTextOutput("plot_brushinfo")
+```
+
+Row {row-height=400}
+-------------------------------------
+
+Column {column-width=200}
+-------------------------------------
+
+```{r eval=FALSE}
+h4("Clicked points")
+tableOutput("plot_clickedpoints")
+h4("Brushed points")
+tableOutput("plot_brushedpoints")
+```
+
+Column {column-width=200}
+-------------------------------------
+
+```{r eval=FALSE}
+### Plot: click/hover info.
+verbatimTextOutput("plot_clickinfo")
+verbatimTextOutput("plot_hoverinfo")
+```
+
+
+

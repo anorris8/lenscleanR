@@ -1,8 +1,9 @@
 ---
-title: "LensCleanR"
+title: "LensCleanR for single cell RNA-Seq analysis with monocle"
 output: 
   flexdashboard::flex_dashboard:
     theme: bootstrap
+    vertical_layout: fill
 runtime: shiny
 ---
 
@@ -22,6 +23,8 @@ library(reshape2)
 library(Biobase)
 library(data.table)
 library(plotly)
+library(shinyjs)
+useShinyjs(rmd = TRUE)
 options(shiny.maxRequestSize = 100*1024^2)
 
 #### Colors
@@ -58,20 +61,96 @@ saved_values <- reactiveValues()
 saved_values$cds <- example_hsmm
 ```
 
+
 Load
 =====================================  
 
+Sidebar {.sidebar data-width=250}
+-------------------------------------
+
 ```{r}
-### Choose dataset
+tags$hr()
+### Use example dataset
 selectInput("dataset", "Choose dataset:",
-            c("hsmm" = "hsmm",
-              "lung" = "lung",
-              "upload" = "upload"))
-actionButton("go_load_data", "Load & Preview Data")
+            c("example muscle cell data" = "hsmm", 
+              "example lung cell data" = "lung",
+              "upload my own data (below)" = "upload")
+            )
+tags$hr()
+
+### Upload user-provided data
+## Exprs data
+fileInput("user_exprs", "Expression data matrix",
+          accept = c("text/csv",
+                     "text/comma-separated-values", 
+                     "text/plain",
+                     ".csv")
+          )
+
+## Pheno data
+fileInput("user_pdata", "Pheno data",
+          accept = c("text/csv",
+                     "text/comma-separated-values", 
+                     "text/plain",
+                     ".csv")
+          )
+
+## Feature data
+fileInput("user_fdata", "Feature data",
+          accept = c("text/csv",
+                     "text/comma-separated-values", 
+                     "text/plain",
+                     ".csv")
+          )
+
+#### User-uploaded data settings:
+## Minimum expression
+numericInput("lowerDetectionLimit", "Detection Limit", value = 0.1, min = 0)
+
+## Type of expression data
+selectInput("exprType", "Expression values are:",
+            c("RPC (recommended)" = "rpc", "RPC sparse matrix" = "rpcSparse",
+              "FPKM" = "fpkm", "Log-transformed FPKM" = "fpkmLog",
+              "Raw counts" = "countsRaw")
+            )
+selectInput("fpkmToRPC", "Convert FPKM to RPC (recommended)", c("TRUE" = "TRUE", "FALSE" = "FALSE"))
+tags$hr()
+
+### Upload user data
+actionButton("go_load_data", "Load data")
+tags$hr()
 ```
+
 ```{r}
+#### Load user-provided files
+## Expression matrix
+reactive({
+  if (is.null(input$user_exprs)) {
+    return(NULL)
+    }
+  saved_values$user_exprs <- read.csv(input$user_exprs$datapath, stringsAsFactors = FALSE)
+  })
+
+## Pheno data
+reactive({
+  if (is.null(input$user_pdata)) {
+    return(NULL)
+    }
+  saved_values$user_pdata <- read.csv(input$user_pdata$datapath, stringsAsFactors = FALSE)
+  })
+
+## Feature data
+reactive({
+  if (is.null(input$user_fdata)) {
+    return(NULL)
+    }
+  saved_values$user_fdata <- read.csv(input$user_fdata$datapath, stringsAsFactors = FALSE)
+  })
+
 ### Load data
 reactive({
+  ### Default is example_hsmm
+  dat <- example_hsmm
   
   if (input$dataset == "hsmm") {
     
@@ -84,46 +163,86 @@ reactive({
     dat <- example_lung
 
   } else if (input$dataset == "upload") {
-  
-    ### User data
-    pd_user <- reactive({
-      pheno <- input$phenoUser
-      if (is.null(pheno)) {return(NULL)}
-      read.csv(pheno$datapath, header = TRUE)
-      })
-    fd_user <- reactive({
-      feature <- input$featureUser
-      if (is.null(feature)) {return(NULL)}
-      read.csv(feature$datapath, header = TRUE)
-      })
-    exprs_user <- reactive({
-      exprs <- input$exprsUser
-      if (is.null(matrix)) 
-        return(NULL)
-      read.csv(matrix$datapath, header = TRUE)
-    })
-    dat <- newCellDataSet(exprs_user, 
-                          new("AnnotatedDataFrame", data = pd_user),
-                          new("AnnotatedDataFrame", data = fd_user),
-                          lowerDetectionLimit = 1, 
-                          expressionFamily = negbinomial.size())
+      
+      ## Load user files
+    user_exprs <- saved_values$user_exprs
+    user_pdata <- saved_values$user_pdata
+    user_fdata <- saved_values$user_fdata
+    pd <- new("AnnotatedDataFrame", data = user_pdata)
+    fd <- new("AnnotatedDataFrame", data = user_fdata)
+    
+    ## Put samples and features in order
+    user_exprs <- user_exprs[order(match(rownames(user_exprs), rownames(user_fdata))), 
+                order(match(colnames(user_exprs), rownames(user_pdata)))]
+    
+    ## Check naming
+    if (rownames(user_exprs) != rownames(user_fdata)) {
+      msg <- 'alert("ERROR: Feature names (e.g. gene IDs) in expression matrix (rownames) and feature data (rownames) do not match";'
+      session$sendCustomMessage(type = 'jsCode', list(value = msg))
+      }
+    if (colnames(user_exprs) != rownames(user_pdata)) {
+      msg <- 'alert("ERROR: Sample names (e.g. cell IDs) in expression matrix (colnames) and pheno data (rownames) do not match";'
+      session$sendCustomMessage(type = 'jsCode', list(value = msg))
+    }
+    
+    if (input$exprType == "countsRaw") {
+      msg <- 'alert("Warning: Although Monocle can be used with raw read counts, these are not directly proportional to expression values unless you normalize them by length, so some Monocle functions could produce nonsense results. If you do not have UMI counts, We recommend you load up FPKM or TPM values instead of raw read counts.";'
+      session$sendCustomMessage(type = 'jsCode', list(value = msg))
+    }
+    
+    if (input$exprType == "fpkm") {
+      cds <- newCellDataSet(as.matrix(user_exprs), pd, fd, expressionFamily = tobit())
+    }
+    
+    if (input$exprType == "fpkmLog") {
+     cds <- newCellDataSet(as.matrix(user_exprs), pd, fd, expressionFamily = gaussianff())
+    }
+    
+    if (input$exprType == "rpcSparse") {
+      cds <- newCellDataSet(as(as.matrix(user_exprs), "sparseMatrix"), pd, fd, expressionFamily = negbinomial())
+    }
+    
+    if (input$exprType == "rpc") {
+      cds <- newCellDataSet(as.matrix(user_exprs), pd, fd, expressionFamily = negbinomial())
+    }
+    
+    if (input$fpkmToRPC == TRUE && exprType == "fpkm" | "fpkmLog") {
+      rpc_matrix <- relative2abs(cds)
+      cds <- newCellDataSet(as(as.matrix(rpcData), "sparseMatrix"), pd, fd, expressionFamily = negbinomial())
+    }
+    
+    if (input$fpkmToRPC == FALSE && exprType == "fpkm" | "fpkmLog") {
+      fpkmWarning <- "Note: If you performed your single-cell RNA-Seq experiment using spike-in standards, you can convert these measurements into mRNAs per cell (RPC). RPC values are often easier to analyze than FPKM or TPM values, because have better statistical tools to model them. In fact, it's possible to convert FPKM or TPM values to RPC values even if there were no spike-in standards included in the experiment"
+      js_string <- 'alert("SOMETHING");'
+      js_string <- sub("SOMETHING", fpkmWarning, js_string)
+      session$sendCustomMessage(type = 'jsCode', list(value = js_string))
+    }
+    
+    ## Create cds object
+    dat <- newCellDataSet(
+      user_exprs, 
+      new("AnnotatedDataFrame", data = user_pdata),
+      new("AnnotatedDataFrame", data = user_fdata),
+      lowerDetectionLimit = input$lowerDetectionLimit, 
+      expressionFamily = input$expressionFamily)
   }
+  
+  ### Save
+  saved_values$cds <- dat
+})
+
+observeEvent(input$go_load_data, {
+  dat <- saved_values$cds
+  
   ### Estimate size factors and estimate dispersions
   dat <- estimateSizeFactors(dat)
   dat <- estimateDispersions(dat)
   
   ### Add total mRNA for each cell (to identify cells with low RNA or doublets)
   pData(dat)$mRNA <- Matrix::colSums(exprs(dat))
-  
-  ### Save data
-  saved_values$cds <- dat
-})
-
-observeEvent(input$go_load_data, {
-  dat <- saved_values$cds
 
   ### Preview pheno Data
-  output$table_pd_preview <- renderDataTable(
+  output$table_pdata <- renderDataTable(
     data.frame(Biobase::pData(dat))
     )
   
@@ -131,14 +250,17 @@ observeEvent(input$go_load_data, {
   if (is.null(dat$num_cells_expressed)) {
     dat <- detectGenes(dat, min_expr = 0.1)
   }
-  fdat <- Biobase::fData(dat)
-  output$plot_fd_preview <- renderPlot(
-    ggplot(fdat, aes(x = num_cells_expressed, group = biotype)) + 
+  fdata <- Biobase::fData(dat)
+  output$plot_fdata <- renderPlot(
+    ggplot(fdata, aes(x = num_cells_expressed, group = biotype)) + 
     geom_histogram(aes(color = biotype, fill = biotype), bins = 50, alpha = 0.1) + 
     theme_bw() +
-    scale_color_manual(values = tol21rainbow[1:length(levels(fdat$biotype))]) +
-    scale_fill_manual(values = tol21rainbow[1:length(levels(fdat$biotype))]) 
+    scale_color_manual(values = tol21rainbow[1:length(levels(fdata$biotype))]) +
+    scale_fill_manual(values = tol21rainbow[1:length(levels(fdata$biotype))]) 
   )
+  
+  ### Save data
+  saved_values$cds <- dat
 })
 ```
 
@@ -146,18 +268,27 @@ Column {.tabset}
 -------------------------------------
 
 ### Features
-```{r }
-plotOutput("plot_fd_preview")
-```
 
+```{r}
+### Error message
+#textOutput("error_feature_names")
+
+### Plot
+plotOutput("plot_fdata")
+```
 
 ### Pheno
+
 ```{r}
-dataTableOutput("table_pd_preview")
+### Error message
+#textOutput("error_sample_names")
+
+### Plot
+dataTableOutput("table_pdata")
 ```
 
 
-QC
+Filter
 ===================================== 
 
 ```{r}
@@ -186,19 +317,20 @@ observeEvent(input$go_filter_features, {
            y = "Features (n)")
   output$plot_num_cells_expr <- renderPlot(plot_num_cells_expr)
 })
-```
-```{r}
+
+
 ### Filter cells: restrict to singlet cells by removing doublets/triplets and cell debris
-observe({
+observeEvent(input$go_filter_cells, {
   dat <- saved_values$cds
   pData(dat)$mRNA <- Matrix::colSums(exprs(dat))
   
   if(is.null(input$mRNA_SD)) {
     return()
   }
+  
   ### Add total mRNA for each cell (to identify cells with low RNA or doublets)
-  upper <- 10^(mean(log10(pData(dat)$mRNA)) + input$mRNA_SD*sd(log10(pData(dat)$mRNA)))
-  lower <- 10^(mean(log10(pData(dat)$mRNA)) - input$mRNA_SD*sd(log10(pData(dat)$mRNA)))
+  upper <- 10^(mean(log10(pData(dat)$mRNA)) + (input$mRNA_SD*sd(log10(pData(dat)$mRNA))))
+  lower <- 10^(mean(log10(pData(dat)$mRNA)) - (input$mRNA_SD*sd(log10(pData(dat)$mRNA))))
 
   ### Tabulate cell types 
   mRNA <- pData(dat)$mRNA
@@ -206,19 +338,23 @@ observe({
   debris <- mRNA[mRNA < lower]
   valid_cells <- mRNA[mRNA > lower & mRNA < upper]
   doublet <- mRNA[mRNA > upper]
-  table_mRNA_filtered <- rbind.data.frame("Total" = length(mRNA), 
-          "Singlets" = length(valid_cells),
-          "Doublets [filtered]" = length(double),
-          "Debris [filtered]" = length(debris))
-  names(table_mRNA_filtered) <- "Number of Cells"
-  saved_values$table_mRNA_filtered <- table_mRNA_filtered
+  table_mRNA_filtered <- cbind.data.frame(
+    "Sample Category" = c("Total", "Singlets", "Doublets [filtered]", "Debris [filtered]"), 
+    "Number of Cells" = rbind(
+      "Total" = length(mRNA), 
+      "Singlets" = length(valid_cells),
+      "Doublets [filtered]" = length(double),
+      "Debris [filtered]" = length(debris)))
+  output$table_mRNA_filtered <- renderTable(table_mRNA_filtered)
     
   ### Add Singlet (valid_cells) column to pData, for plotting/filtering
   pData(dat)$valid_cells <- ifelse(rownames(pData(dat)) %in% names(valid_cells), TRUE, FALSE)
+  saved_values$cds <- dat
   
   ### Plot cell total mRNA distribution
   pdat <- pData(dat)
-  saved_values$plot_mRNA_log <- ggplot(
+  
+  plot_mRNA_log <- ggplot(
     pdat, aes(x = mRNA/1E06, color = valid_cells, fill = valid_cells)) + 
     geom_density(alpha = 0.2) +
     geom_vline(xintercept = lower/1E06, lwd = 1.2) + 
@@ -227,41 +363,16 @@ observe({
     scale_color_manual(values = cbs4dive[c(1,4)]) +
     scale_fill_manual(values = cbs4dive[c(1,4)]) +
     labs(x = "Total mRNA of Cell (Millions)", y = "Density",
-         title = "Total mRNA Distribution (unfiltered)")
-  
-  ### Save
-  saved_values$cds <- dat
-})
-
-output$table_mRNA_filtered <- renderTable(saved_values$table_mRNA_filtered)
-output$plot_mRNA_log <- renderPlot(saved_values$plot_mRNA_log)
-
-observeEvent(input$go_filter_cells, {
-  dat <- saved_values$cds
+         title = "Total mRNA Distribution (filtered)")
+  output$plot_mRNA_log <- renderPlot(plot_mRNA_log)
   
   ### Filter cell samples
   dat <- dat[ , rownames(subset(pData(dat), valid_cells == TRUE))]
   dat <- detectGenes(dat, min_expr = input$min_expr)
-
-  ### Plot filtered results (log-transformed)
-  L <- log(exprs(dat[saved_values$expressed_genes, ]))
-  if(is.null(dim(L))) { 
-    return() 
-  }
-  mRNA_log <- melt(Matrix::t(scale(Matrix::t(L))))
-  saved_values$plot_mRNA_log <- ggplot(
-      mRNA_log, aes(x = value))
-      geom_density() + 
-      stat_function(fun = dnorm, size = 0.5) +
-      theme_bw() +
-      labs(x = "Standardized log(FPKM)", y = "Density", 
-           title = "Total mRNA: Lognormal distribution (filtered)")
   
   ### Save
   saved_values$cds_filt <- dat
 })
-
-output$plot_mRNA_log <- renderPlot(saved_values$plot_mRNA_log)
 ```
 
 Inputs {.sidebar}
@@ -277,7 +388,7 @@ sliderInput("min_cells", "Min. number of cells expressing feature",
             min = 0, max = 100, step = 1, value = 10)
 
 ### Filter features
-actionButton("go_filter_features", "Filter features [in progress]")
+actionButton("go_filter_features", "Filter features")
 
 ### Filter: Remove doublets and debris-cells (keep singlets only)
 sliderInput("mRNA_SD", "Number of SDs from mean Total mRNA for singlet cell cutoff",
@@ -301,45 +412,52 @@ plotOutput("plot_num_cells_expr")
 
 ```{r}
 ### Plot
-plotOutput("plot_mRNA")
-dataTableOutput("table_mRNA_filtered")
 plotOutput("plot_mRNA_log")
 ```
 
+### Summary
 
-Exploratory [in progress]
+```{r}
+### Table
+tableOutput("table_mRNA_filtered")
+```
+
+
+Exploratory
 ===================================== 
 
-```{r eval=FALSE}
+```{r}
 ### Select column in table -> show details in inputs
-observeEvent(input$level_x, {
-  if (is.null(input$level_x)) 
+observeEvent(input$level_xaxis, {
+  dat <- saved_values$cds
+  if (is.null(input$level_xaxis)) {
     level_xvar <- "select data level to filter"
-  
-  if (input$level_x == "fData")
-    level_xvar <- colnames(fData(saved_values$cds))
-  
-  else (input$level_x == "pData")
-    level_xvar <- colnames(pData(saved_values$cds))
-  
-    updateSelectInput(session, "level_x", choices = level_xvar)
+  } 
+  if (input$level_xaxis == "fData") {
+    level_xvar <- colnames(fData(dat))
+  }
+  if (input$level_xaxis == "pData") {
+    level_xvar <- colnames(pData(dat))
+  }
+  updateSelectInput(session, "level_xvar", choices = level_xvar)
 })
 
-observeEvent(input$level_y, {
-  if (is.null(input$level_y)) 
-    level_yvar <- "select data type to filter"
-  
-  if (input$level_y == "fData")
-    level_yvar <- colnames(fData(saved_values$cds))
-  
-  else (input$level_y == "pData")
-    level_yvar <- colnames(pData(saved_values$cds))
-  
-    updateSelectInput(session, "level_y", choices = level_yvar)
+observeEvent(input$level_yaxis, {
+  dat <- saved_values$cds
+  if (is.null(input$level_yaxis)) {
+    level_yvar <- "select data level to filter"
+  } 
+  if (input$level_yaxis == "fData") {
+    level_yvar <- colnames(fData(dat))
+  }
+  if (input$level_yaxis == "pData") {
+    level_yvar <- colnames(pData(dat))
+  }
+  updateSelectInput(session, "level_yvar", choices = level_yvar)
 })
 
 ### Plot
-observeEvent(input$go_plot_exporatory, {
+observeEvent(input$go_plot_exploratory, {
   dat <- Biobase::pData(saved_values$cds_filt)
   updateSelectizeInput(session, "select_genes", 
                        choices = fData(saved_values$cds_filt)$gene_short_name, 
@@ -399,9 +517,9 @@ Inputs {.sidebar}
 
 ```{r}
 ### Choose data levels to plot
-selectInput("level_x", "Choose data level to plot on x-axis:",
+selectInput("level_xaxis", "Choose data level to plot on x-axis:",
             c("fData" = "fData", "pData" = "pData"))
-selectInput("level_y", "Choose 2nd data level to plot on y-axis:",
+selectInput("level_yaxis", "Choose 2nd data level to plot on y-axis:",
             c("fData" = "fData", "pData" = "pData"))
 
 ### Choose variables to plot
@@ -410,8 +528,9 @@ selectInput("level_yvar", "Choose variable to plot on y-axis:", NULL)
 
 ### Choose gene(s) to highlight
 selectizeInput("select_genes", "Gene symbol", choices = NULL, options = list(placeholder = "select a gene")) 
+
 ### Action button to plot
-actionButton("go_plot_exporatory", "Plot")
+actionButton("go_plot_exploratory", "Plot")
 
 ### Download brushed samples
 downloadButton("download_brushedpoints", "Download Brushed Points")
@@ -463,4 +582,387 @@ verbatimTextOutput("plot_hoverinfo")
 ```
 
 
+Classify and count cells
+=====================================
 
+Column {.tabset}
+-------------------------------------
+
+### Cell-type hierarchy
+
+```{r eval=FALSE}
+## User provides genes that mark a population of cells
+  gene1_id <- reactive({
+    rownames(subset(fData(cdsFilt), gene_short_name == input$gene1))
+  })
+  gene2_id <- reactive({
+    rownames(subset(fData(cdsFilt), gene_short_name == input$gene2))
+  })
+  ## Need to print warning if gene name is not in fData(cds), and remind user of nomenclature
+  cell1_id <- reactive({
+    input$cell1
+  })
+  cell2_id <- reactive({
+    input$cell2
+  })
+  
+  ## Add cell type information
+  cth <- newCellTypeHierarchy()
+  cth <- addCellType(cth, cell1_id, classify_func = function (x) {
+    x[gene1_id, ] >= 1
+    })
+  cth <- addCellType(cth, cell2_id, classify_func = function (x) {
+    x[gene1_id, ] < 1 & x[gene2_id, ] > 1
+    })
+  
+  ## Classify cells based on that information
+  cds <- classifyCells(cds, cth, input$min_expr)
+  
+  ## Summarize results in table
+  renderTable(table(pData(cds)$CellType))
+  
+  ## Summarize results with pie chart
+  plot.supervised <- ggplot(pData(cds), aes(x = factor(1), fill = factor(CellType))) +
+    geom_bar(width = 1) + 
+    coord_polar(theta = "y") +
+    theme(axis.title = element_blank())
+  renderPlot(plot.supervised)
+```
+
+
+### Unsupervised clustering
+
+```{r eval=FALSE}
+disp_table <- dispersionTable(cds)
+  unsup_clustering_genes <- subset(disp_table, 
+                                   mean_expression >= input$mean_expr & 
+                                     dispersion_empirical >= 1 * dispersion_fit)
+  
+  ## Plot
+  ## Need to add user input for what covariates/attributes to include in the model (eg Media)
+  ## Need to make the rendering iterative/interactive
+  cds <- setOrderingFilter(cds, unsup_clustering_genes$gene_id)
+  plot_ordering_genes(cds)
+  cds <- clusterCells(cds, num_clusters = input$ncell)
+  plot_cell_trajectory(cds, 1, 2, color = "CellType")
+  plot_cell_trajectory(cds, 1, 2, color = "Media")
+  cds <- clusterCells(cds, residualModelFormulaStr = "~Media", num_clusters = input$ncell)
+  plot_cell_trajectory(cds, 1, 2, color = "Media")
+  cds <- clusterCells(cds, residualModelFormulaStr="~Media + num_genes_expr", num_clusters = input$ncell)
+  plot_cell_trajectory(cds, 1, 2, color = "num_genes_expr")
+  plot_cell_trajectory(cds, 1, 2, color = "CellType")
+```
+  
+  
+### Semi-supervised clustering
+
+```{r eval=FALSE}
+## Semi-supervised clustering with known gene markers
+marker_diff <- markerDiffTable(cds[expressed_genes, ],
+                                 cth,
+                                 residualModelFormulaStr = "~Media", cores = 1)
+  candidate_clustering_genes <- rownames(subset(marker_diff, qval < input$qval))
+  marker_spec <- calculateMarkerSpecificity(cds[candidate_clustering_genes, ], cth)
+  
+  ## Print top 3 gene markers
+  output$topGenes <- head(selectTopMarkers(marker_spec, 3))
+  
+  ## Use the top 20 markers for clustering
+  semisup_clustering_genes <- unique(selectTopMarkers(marker_spec, 20)$gene_id)
+  
+  ## Plot
+  cds <- setOrderingFilter(cds, semisup_clustering_genes)
+  renderPlot(plot_ordering_genes(cds))
+  cds <- clusterCells(cds,
+                       num_clusters = input$ncell,
+                       clustering_genes = semisup_clustering_genes,
+                       residualModelFormulaStr = "~Media + num_genes_expr")
+  renderPlot(plot_cell_trajectory(cds, 1, 2, 
+                                  color = "CellType"))
+```
+
+
+### Impute cell-types
+
+```{r eval=FALSE}
+  cds <- clusterCells(cds,
+                       num_clusters = input$ncell,
+                       frequency_thresh = input$freq,
+                       cell_type_hierarchy = cth,
+                       clustering_genes = rownames(subset(marker_diff, qval < qval)),
+                       residualModelFormulaStr = "~Media + num_genes_expr")
+  
+  ## Plot
+  renderPlot(plot_cell_trajectory(cds, 1, 2, 
+                                  color = "CellType", 
+                                  markers = c(gene1_id, gene2_id)))
+  plot.imputed <- ggplot(pData(cds), aes(x = factor(1), fill = factor(CellType))) +
+    geom_bar(width = 1) + coord_polar(theta = "y") +
+    theme(axis.title = element_blank())
+  renderPlot(plot.imputed)
+  cds1 <- cds[ , pData(cds)$CellType == cds1]
+  cds1 <- estimateDispersions(cds1)
+```
+
+
+Single-cell trajectories ("Pseudotime")
+=====================================
+
+Column {.tabset}
+-------------------------------------
+
+### Unsupervised ordering
+
+```{r eval=FALSE}
+reactive({
+  dat <- saved_res$cds1
+  diff_test_res <- differentialGeneTest(dat[saved_values$expressed_genes, ],
+                                        fullModelFormulaStr = "~Media")
+  ordering_genes <- rownames(subset(diff_test_res, qval < input$qval))
+  disp_table <- dispersionTable(dat)
+  ordering_genes <- subset(disp_table,
+                           mean_expression >= input$mean_exp &
+                             dispersion_empirical >= 2 * dispersion_fit)$gene_id
+  dat <- setOrderingFilter(dat, ordering_genes)
+  saved_values$cds1 <- dat
+})
+  
+  ## Plots
+observeEvent(input$go_plot_2.1{
+  dat <- saved_res$cds1
+  output$plot_2.1.a <- renderPlot(plot_ordering_genes(dat))
+  dat <- reduceDimension(dat, 
+                         #max_components = input$max_components,
+                         max_components = 2)
+  dat <- orderCells(dat, reverse = FALSE)
+  
+  ## Plot all genes
+  output$plot_2.1.b <- renderPlot(plot_cell_trajectory(dat, color_by = "Hours"))
+  
+  ## Plot subset of genes
+  dat_expr_genes <- rownames(subset(fData(dat), num_cells_expressed >= input$num_cells_expressed))
+  datFilt <- dat[dat_expr_genes,]
+  my_genes <- rownames(subset(fData(cds1Filt), gene_short_name %in% input$genesUser))
+  dat_subset <- datFilt[my_genes, ]
+  output$plot_2.1.c <- renderPlot(plot_genes_in_pseudotime(dat_subset, color_by = "Hours"))
+  
+  saved_values$cds1Filt <- datFilt
+})
+```
+
+### Ordering with PCA-selected genes
+
+```{r eval=FALSE}
+reactive({
+  dat <- saved_values$cds1Filt
+  expr_Filt <- t(t(exprs(dat)/pData(dat)$Size_Factor))
+  nz_genes <- which(expr_Filt != 0)
+  expr_Filt[nz_genes] <- log(expr_Filt[nz_genes] + 1)
+  
+  ## Calculate variance across genes without converting to dense matrix
+  expr_means <- Matrix::rowMeans(expr_Filt)
+  expr_vars <- Matrix::rowMeans((expr_Filt - expression_means)^2)
+  
+  ## Filter out genes that are constant across all cells
+  genes_to_keep <- expr_vars > 0
+  expr_filt <- expr_Filt[genes_to_keep, ]
+  expr_means <- expr_means[genes_to_keep]
+  expr_vars <- expr_vars[genes_to_keep]
+  
+  ## Take top PCA loading genes
+  irlba_pca_res <- irlba(t(expr_Filt),
+                         nu = 0,
+                         center = expr_means,
+                         scale = sqrt(expr_vars),
+                         right_only = TRUE)$v
+  rownames(irlba_pca_res) <- rownames(expr_Filt)
+  PC2_genes <- names(sort(abs(irlba_pca_res[ , 2]), decreasing = TRUE))[1:100]
+  PC3_genes <- names(sort(abs(irlba_pca_res[ , 3]), decreasing = TRUE))[1:100]
+  ordering_genes <- union(PC2_genes, PC3_genes)
+  dat <- setOrderingFilter(dat, ordering_genes)
+  dat <- reduceDimension(dat, max_components = 2)
+  dat <- orderCells(dat, reverse = FALSE)
+  saved_values$cds1Filt <- dat
+})
+  
+  ## Plot
+observeEvent({
+  output$plot_2.2 <- renderPlot(plot_cell_trajectory(saved_values$cds1Filt, color_by = "Hours"))
+})
+```
+
+### Semi-supervised ordering
+
+```{r eval=FALSE}
+### Semi-supervised ordering with known marker genes
+reactive({
+  dat <- saved_values$cds1
+  cth <- newCellTypeHierarchy()
+  cth <- addCellType(cth, cell1_id, classify_func = function (x) {
+    x[gene1_id, ] >= 1
+    })
+  cth <- addCellType(cth, cell2_id, classify_func = function (x) {
+    x[gene2_id, ] >= 1
+    })
+  marker_diff <- markerDiffTable(dat[saved_values$expressed_genes, ],
+                                 cth,
+                                 cores = 1)
+  semisup_clustering_genes <- rownames(subset(marker_diff, qval < input$qval))
+  
+  ## Print number
+  renderTable(length(semisup_clustering_genes))
+  
+  cds1 <- setOrderingFilter(cds1, semisup_clustering_genes)
+  renderPlot(plot_ordering_genes(cds1))
+  cds1 <- reduceDimension(cds1, max_components = 2)
+  cds1 <- orderCells(cds1, reverse = TRUE)
+  
+  ## Plot
+  renderPlot(plot_cell_trajectory(cds1, color_by = "Hours"))
+  
+  ## Plot subset of genes
+  cds1Filt <- cds1[saved_values$expressed_genes, ]
+  my_genes <- rownames(subset(fData(cds1Filt), gene_short_name %in% input$genesUser))
+  cds_subset <- cds1Filt[my_genes, ]
+  renderPlot(plot_genes_in_pseudotime(cds_subset, color_by = "Hours"))
+})
+  
+## Reconstructing branched trajectories Plot
+reactive({
+  dat <- saved_values$cds_filt
+  plot.traject <- plot_cell_trajectory(orderCells(dat, root_state = input$root_state),
+                                       color_by = input$color_by)
+  renderPlot(plot.traject)
+  #renderPlot(plot.traject + facet_wrap(~input$facet_by))
+})
+```
+  
+  
+Differential expression
+=====================================
+
+Column {.tabset}
+-------------------------------------
+  
+### Basic
+
+```{r eval=FALSE}
+  marker_genes <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
+  diff_test_res <- differentialGeneTest(cds1Filt[marker_genes, ],
+                                        fullModelFormulaStr = "~Media")
+  sig_genes <- subset(diff_test_res, qval < qval)
+  
+  ## Print results
+  renderTable(sig_genes[ , c("gene_short_name", "pval", "qval")])
+  
+  ## Plot
+  cds_subset <- cds1Filt[rownames(subset(fData(cds1Filt), gene_short_name %in% genesUser)), ]
+  renderPlot(plot_genes_jitter(cds_subset, grouping = "Media", ncol = 2))
+
+  #### Finding genes that distinguish cell type or state
+  to_be_tested <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
+  cds_subset <- cds[to_be_tested, ]
+  diff_test_res <- differentialGeneTest(cds_subset, fullModelFormulaStr = "~CellType")
+  
+  ## Print results
+  renderTable(diff_test_res[ , c("gene_short_name", "pval", "qval")])
+  
+  ## Plot
+  renderPlot(plot_genes_jitter(cds_subset, 
+                               grouping = "CellType", 
+                               color_by = "CellType",
+                               nrow = 1, 
+                               ncol = NULL, 
+                               plot_trend = TRUE))
+  full_model_fits <- fitModel(cds_subset, modelFormulaStr = "~CellType")
+  reduced_model_fits <- fitModel(cds_subset, modelFormulaStr = "~1")
+  diff_test_res <- compareModels(full_model_fits, reduced_model_fits)
+  
+  ## Print results
+  renderTable(diff_test_res)
+
+  #### Finding genes that change as a function of pseudotime
+  to_be_tested <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
+  cds_subset <- cds1[to_be_tested, ]
+  diff_test_res <- differentialGeneTest(cds_subset, fullModelFormulaStr = "~sm.ns(Pseudotime)")
+  
+  ## Print results
+  renderTable(diff_test_res[ , c("gene_short_name", "pval", "qval")])
+  
+  ## Plot
+  renderPlot(plot_genes_in_pseudotime(cds_subset, color_by = "Hours"))
+  
+  ## Clustering genes by pseudotemporal expression pattern
+  diff_test_res <- differentialGeneTest(cds1[marker_genes, ],
+                                        fullModelFormulaStr = "~sm.ns(Pseudotime)")
+  sig_gene_names <- rownames(subset(diff_test_res, qval < qval))
+  
+  ## Plot
+  plot.pseudoCluster <- plot_pseudotime_heatmap(cds1[sig_gene_names, ], 
+                                                num_clusters = 2, 
+                                                cores = 1, 
+                                                show_rownames = TRUE)
+  renderPlot(plot.pseudoCluster)
+```
+  
+  
+### Multi-factorial
+
+```{r eval=FALSE}
+  to_be_tested <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
+  cds_subset <- cds[to_be_tested, ]
+  diff_test_res <- differentialGeneTest(cds_subset,
+                                        fullModelFormulaStr = "~CellType + Hours",
+                                        reducedModelFormulaStr = "~Hours")
+  diff_test_res[ , c("gene_short_name", "pval", "qval")]
+  renderPlot(plot_genes_jitter(cds_subset,
+                               grouping = "Hours", 
+                               color_by = "CellType", 
+                               plot_trend = TRUE) +
+               acet_wrap(~feature_label, scales = "free_y"))
+```
+
+
+Trajectory branches
+=====================================
+
+```{r eval=FALSE}
+dat <- saved_values$cds_filt
+  
+renderPlot(plot_cell_trajectory(
+  dat, 
+  color_by = "Time"))
+BEAM_res <- BEAM(dat, branch_point = 1, cores = 1)
+BEAM_res <- BEAM_res[order(BEAM_res$qval), ]
+BEAM_res <- BEAM_res[ , c("gene_short_name", "pval", "qval")]
+  
+## Plot heatmap
+renderPlot(plot_genes_branched_heatmap(
+  dat[rownames(subset(BEAM_res, qval < qval)), ],
+  branch_point = 1,
+  num_clusters = 4,
+  cores = 1,
+  use_gene_short_name = TRUE,
+  show_rownames = TRUE))
+dat_genes <- rownames(subset(fData(dat), gene_short_name %in% genesUser))
+  
+## Plot pseudotime
+renderPlot(plot_genes_branched_pseudotime(
+  dat[dat_genes, ],
+  branch_point = 1,
+  color_by = "Time",
+  ncol = 1))
+```
+
+
+About
+=====================================
+
+### About the LensCleanR shiny app
+
+```{r}
+renderPrint({
+  "Based on the monocle v2 tutorial.";
+  "Developed by (in alphabetical order) Gui G, Mohammadyani D, Norris AL, and Workman RE, under the guidance of Jeff Leek, Sean Kross, and Loyal Goff as part of the Data Apps Course at Johns Hopkins School of Medicine in Spring 2017."
+})
+```

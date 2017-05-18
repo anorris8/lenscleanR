@@ -2,9 +2,13 @@
 title: "LensCleanR"
 output: 
   flexdashboard::flex_dashboard:
+    logo: www/logo_small.png
     theme: bootstrap
     orientation: columns
     vertical_layout: fill
+    source_code: "https://github.com/anorris8/lenscleanR"
+    navbar:
+      - {title: "Monocle", href: "http://cole-trapnell-lab.github.io/monocle-release/", align = left}
 runtime: shiny
 ---
 
@@ -115,7 +119,7 @@ selectInput("exprType", "Expression values are:",
               "FPKM" = "fpkm", "Log-transformed FPKM" = "fpkmLog",
               "Raw counts" = "countsRaw")
             )
-selectInput("fpkmToRPC", "Convert FPKM to RPC (recommended)", c("TRUE" = "TRUE", "FALSE" = "FALSE"))
+selectInput("fpkmToRPC", "Convert FPKM to RPC", c("TRUE (recommended)" = "TRUE", "FALSE" = "FALSE"))
 tags$hr()
 
 ### Upload user data
@@ -514,7 +518,7 @@ output$download_brushedpoints <- downloadHandler(
 ```
 
 
-Inputs {.sidebar}
+Inputs {.sidebar data-width=250}
 -------------------------------------
 
 ```{r}
@@ -587,104 +591,242 @@ verbatimTextOutput("plot_hoverinfo")
 Cell-type hierarchy {data-navmenu="Classify"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+### Cell type 1 and its gene marker
+textInput("cell1", "Cell type 1", NULL)
+selectizeInput("gene1", "Gene marking cell type 1", choices = NULL, options = list(placeholder = "select gene 1")) 
+tags$hr
+
+### Cell type 2 and its gene marker
+textInput("cell2", "Cell type 2", NULL)
+selectizeInput("gene2", "Gene marking cell type 2", choices = NULL, options = list(placeholder = "select gene 2")) 
+tags$hr
+
+### Minimum expression value
+sliderInput("gene_min_expr", "Min. expression value",
+            min = 0, max = 10, step = 0.01, value = 0.1)
+```
 ```{r eval=FALSE}
 ## Classify and count cells
 ## User provides genes that mark a population of cells
-  gene1_id <- reactive({
-    rownames(subset(fData(cdsFilt), gene_short_name == input$gene1))
-  })
-  gene2_id <- reactive({
-    rownames(subset(fData(cdsFilt), gene_short_name == input$gene2))
-  })
-  ## Need to print warning if gene name is not in fData(cds), and remind user of nomenclature
-  cell1_id <- reactive({
-    input$cell1
-  })
-  cell2_id <- reactive({
-    input$cell2
-  })
+## Need to print warning if gene name is not in fData(cds), and remind user of nomenclature
+reactive({
+  dat <- saved_values$cdsFilt
+  
+  ## Get gene IDs
+  gene1_id <- rownames(subset(fData(dat), 
+                              gene_short_name == input$gene1))
+
+  gene2_id <- rownames(subset(fData(cdsFilt), 
+                              gene_short_name == input$gene2))
   
   ## Add cell type information
   cth <- newCellTypeHierarchy()
-  cth <- addCellType(cth, cell1_id, classify_func = function (x) {
+  cth <- addCellType(cth, input$cell1, classify_func = function (x) {
     x[gene1_id, ] >= 1
     })
-  cth <- addCellType(cth, cell2_id, classify_func = function (x) {
+  cth <- addCellType(cth, input$cell2, classify_func = function (x) {
     x[gene1_id, ] < 1 & x[gene2_id, ] > 1
     })
   
   ## Classify cells based on that information
-  cds <- classifyCells(cds, cth, input$min_expr)
+  dat <- classifyCells(dat, cth, input$gene_min_expr)
+  
+  ## Save
+  saved_values$cth <- cth
+  saved_values$cdsFilt <- dat
   
   ## Summarize results in table
-  renderTable(table(pData(cds)$CellType))
+  output$table_classify_supervised <- renderTable({table(pData(dat)$CellType)})
   
   ## Summarize results with pie chart
-  plot.supervised <- ggplot(pData(cds), aes(x = factor(1), fill = factor(CellType))) +
+  output$plot_classify_supervised_piechart <- renderPlot({
+    ggplot(pData(dat), aes(x = factor(1), fill = factor(CellType))) +
     geom_bar(width = 1) + 
     coord_polar(theta = "y") +
     theme(axis.title = element_blank())
-  renderPlot(plot.supervised)
+    })
+})
 ```
 
+Column {.tabset}
+-------------------------------------
+
+### Results: Pie chart 
+```{r eval=FALSE}
+plotOutput("plot_classify_supervised_piechart")
+```
+
+### Results: Table
+```{r eval=FALSE}
+tableOutput("table_classify_supervised")
+```
 
 Unsupervised clustering {data-navmenu="Classify"}
 =====================================
 
 ```{r eval=FALSE}
-disp_table <- dispersionTable(cds)
-  unsup_clustering_genes <- subset(disp_table, 
-                                   mean_expression >= input$mean_expr & 
-                                     dispersion_empirical >= 1 * dispersion_fit)
+### Select column in table -> show details in inputs
+observe({
+  pd_cols <- colnames(pData(saved_values$cds))
+  updateCheckboxGroupInput(session, "pdata_model_var", choices = pd_cols)
+})
+```
+
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+### Minimum mean expression value
+sliderInput("min_mean_expr", "Minimum mean expression",
+            min = 0, max = 10, step = 0.01, value = 0.5)
+
+### Number of clusters
+selectInput("num_clusters", "Number of clusters", NULL)
+
+### Select pheno data for plot coloring
+selectInput("pdata_color_var", "Choose variable(s) for model", NULL)
+tags$hr
+
+### Use model?
+checkboxInput("use_model", "Use model?", value = "Yes")
+
+### Select pheno data for residual model (e.g. "~Media")
+checkboxGroupInput("pdata_model_var", "Choose variable for residual model", NULL)
+```
+```{r eval=FALSE}
+reactive({
+  dat <- saved_values$cds
+  disp_table <- dispersionTable(dat)
+  unsup_clustering_genes <- subset(
+    disp_table, 
+    mean_expression >= input$min_mean_expr & 
+      dispersion_empirical >= 1 * dispersion_fit)
   
   ## Plot
-  ## Need to add user input for what covariates/attributes to include in the model (eg Media)
-  ## Need to make the rendering iterative/interactive
-  cds <- setOrderingFilter(cds, unsup_clustering_genes$gene_id)
-  plot_ordering_genes(cds)
-  cds <- clusterCells(cds, num_clusters = input$ncell)
-  plot_cell_trajectory(cds, 1, 2, color = "CellType")
-  plot_cell_trajectory(cds, 1, 2, color = "Media")
-  cds <- clusterCells(cds, residualModelFormulaStr = "~Media", num_clusters = input$ncell)
-  plot_cell_trajectory(cds, 1, 2, color = "Media")
-  cds <- clusterCells(cds, residualModelFormulaStr="~Media + num_genes_expr", num_clusters = input$ncell)
-  plot_cell_trajectory(cds, 1, 2, color = "num_genes_expr")
-  plot_cell_trajectory(cds, 1, 2, color = "CellType")
-```
+  dat <- setOrderingFilter(dat, unsup_clustering_genes$gene_id)
+  if (is.null(input$use_model)) {
+    dat <- clusterCells(dat, num_clusters = input$num_clusters)
+    the_plot <- plot_cell_trajectory(dat, 1, 2, color = input$pdata_color_var)
+    
+    } else {
+      dat <- clusterCells(
+        dat, 
+        residualModelFormulaStr = paste0("~", paste(input$pdata_model_var, collapse = " + ")), 
+        num_clusters = input$num_clusters)
+      the_plot <- plot_cell_trajectory(dat, 1, 2, color = input$pdata_color_var)
+    }
   
+  output$plot_classify_unsupervised <- renderPlot({the_plot})
+})
+```
+
+Column {.tabset}
+-------------------------------------
+
+### Plot
+```{r}
+plotOutput("plot_classify_unsupervised")
+```
   
 Semi-supervised clustering {data-navmenu="Classify"}
 =====================================
 
 ```{r eval=FALSE}
-## Semi-supervised clustering with known gene markers
-marker_diff <- markerDiffTable(cds[expressed_genes, ],
-                                 cth,
-                                 residualModelFormulaStr = "~Media", cores = 1)
-  candidate_clustering_genes <- rownames(subset(marker_diff, qval < input$qval))
-  marker_spec <- calculateMarkerSpecificity(cds[candidate_clustering_genes, ], cth)
-  
-  ## Print top 3 gene markers
-  output$topGenes <- head(selectTopMarkers(marker_spec, 3))
-  
-  ## Use the top 20 markers for clustering
-  semisup_clustering_genes <- unique(selectTopMarkers(marker_spec, 20)$gene_id)
-  
-  ## Plot
-  cds <- setOrderingFilter(cds, semisup_clustering_genes)
-  renderPlot(plot_ordering_genes(cds))
-  cds <- clusterCells(cds,
-                       num_clusters = input$ncell,
-                       clustering_genes = semisup_clustering_genes,
-                       residualModelFormulaStr = "~Media + num_genes_expr")
-  renderPlot(plot_cell_trajectory(cds, 1, 2, 
-                                  color = "CellType"))
+### Select column in table -> show details in inputs
+observe({
+  pd_cols <- colnames(pData(saved_values$cds))
+  updateSelectInput(session, "pdata_model_var", choices = pd_cols)
+})
 ```
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+### Set q-value
+numericInput("qval", "q-value", 
+             min = 0, max = 1, step = 0.01, value = 0.10)
+
+### Select pheno data for plot coloring
+selectInput("pdata_color_var", "Choose variable(s) for model", NULL)
+
+### Select pheno data for residual model (e.g. "~Media")
+checkboxGroupInput("pdata_model_var", "Choose variable(s) for residual model", NULL)
+
+tags$hr
+
+### Number of clusters
+selectInput("num_clusters", "Number of clusters", NULL)
+
+### Number of top genes to use for clustering?
+numericInput("num_genes", "Number of genes to use for clustering", 
+             min = 1, max = 20000, step = 1, value = 20)
+```
+```{r eval=FALSE}
+## Semi-supervised clustering with known gene markers
+reactive({
+  dat <- saved_values$cds
+  cth <- saved_values$cth
+  
+  marker_diff <- markerDiffTable(
+    dat[saved_values$expressed_genes, ],
+    cth,
+    residualModelFormulaStr = paste0("~", paste(input$pdata_model_var, collapse = " + "),
+    #residualModelFormulaStr = "~Media", 
+    cores = 1))
+  
+  candidate_clustering_genes <- rownames(
+    subset(marker_diff, qval < input$qval))
+  
+  marker_spec <- calculateMarkerSpecificity(
+    dat[candidate_clustering_genes, ], cth)
+  
+
+  ### Table of gene markers used for clustering
+  semisup_clustering_genes <- unique(
+    selectTopMarkers(marker_spec, input$num_genes)$gene_id)
+  output$table_classify_semisupervised <- renderTable({
+    head(selectTopMarkers(marker_spec, input$num_genes))
+    })
+  
+  ### Plot from clustering
+  dat <- setOrderingFilter(dat, semisup_clustering_genes)
+  renderPlot(plot_ordering_genes(dat))
+  dat <- clusterCells(
+    dat,
+    num_clusters = input$ncell,
+    clustering_genes = semisup_clustering_genes,
+    #residualModelFormulaStr = "~Media + num_genes_expr"))
+    residualModelFormulaStr = paste0("~", paste(input$pdata_model_var, collapse = " + ")))
+
+  output$plot_classify_semisupervised <- renderPlot({
+    plot_cell_trajectory(dat, 1, 2, 
+                         color = input$pdata_color_var)
+  })
+})
+```
+
+Column {.tabset}
+-------------------------------------
+
+### Table: Genes used for classification
+```{r eval=FALSE}
+tableOutput("table_classify_semisupervised")
+```
+
+### Plot
+```{r eval=FALSE}
+plotOutput("plot_classify_semisupervised")
+```
 
 Impute cell-types {data-navmenu="Classify"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
   cds <- clusterCells(cds,
                        num_clusters = input$ncell,
@@ -705,10 +847,13 @@ Impute cell-types {data-navmenu="Classify"}
   cds1 <- estimateDispersions(cds1)
 ```
 
-
 Unsupervised ordering {data-navmenu="Pseudotime"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
 reactive({
   dat <- saved_res$cds1
@@ -749,6 +894,10 @@ observeEvent(input$go_plot_2.1{
 Ordering with PCA-selected genes {data-navmenu="Pseudotime"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
 reactive({
   dat <- saved_values$cds1Filt
@@ -791,6 +940,10 @@ observeEvent({
 Semi-supervised ordering {data-navmenu="Pseudotime"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
 ### Semi-supervised ordering with known marker genes
 reactive({
@@ -838,6 +991,10 @@ reactive({
 Branches {data-navmenu="Pseudotime"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
 dat <- saved_values$cds_filt
   
@@ -869,6 +1026,10 @@ renderPlot(plot_genes_branched_pseudotime(
 Basic {data-navmenu="Differential expression"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
   marker_genes <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
   diff_test_res <- differentialGeneTest(cds1Filt[marker_genes, ],
@@ -932,6 +1093,10 @@ Basic {data-navmenu="Differential expression"}
 Multi-factorial {data-navmenu="Differential expression"}
 =====================================
 
+Inputs {.sidebar data-width=250}
+-------------------------------------
+```{r eval=FALSE}
+```
 ```{r eval=FALSE}
   to_be_tested <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
   cds_subset <- cds[to_be_tested, ]
@@ -950,11 +1115,33 @@ Multi-factorial {data-navmenu="Differential expression"}
 About
 =====================================
 
+Row {data-height=200}
+-------------------------------------
+
 ### About the LensCleanR shiny app
 
-```{r}
-renderPrint({
-  "Based on the monocle v2 tutorial.";
-  "Developed by (in alphabetical order) Gui G, Mohammadyani D, Norris AL, and Workman RE, under the guidance of Jeff Leek, Sean Kross, and Loyal Goff as part of the Data Apps Course at Johns Hopkins School of Medicine in Spring 2017."
-})
-```
+Based on the [Monocle Tutorial (pdf)](https://bioconductor.org/packages/devel/bioc/vignettes/monocle/inst/doc/monocle-vignette.pdf)  
+Developed by:
+    - Gege Gui 
+    - Dariush Mohammadyani
+    - Alexis Norris
+    - Rachael Workman Sparklin
+
+Developed under the guidance of Jeff Leek, Sean Kross, and Loyal Goff as part of the Data Apps Course at Johns Hopkins School of Medicine in Spring 2017.
+
+Row
+------------------------------------
+
+### About Monocle
+
+**Clustering, differential expression, and trajectory analysis for single-cell RNA-Seq using Monocle**  
+  - Author: Cole Trapnell (<coletrap at uw.edu>)  
+  - [Github repo](http://cole-trapnell-lab.github.io/monocle-release/)    
+  - [Bioconductor](https://bioconductor.org/packages/release/bioc/html/monocle.html)  
+  - [Tutorial (pdf)](https://bioconductor.org/packages/devel/bioc/vignettes/monocle/inst/doc/monocle-vignette.pdf) 
+Monocle performs differential expression and time-series analysis for single-cell expression experiments. It orders individual cells according to progress through a biological process, without knowing ahead of time which genes define progress through that process. Monocle also performs differential expression analysis, clustering, visualization, and other useful tasks on single cell expression data. It is designed to work with RNA-Seq and qPCR data, but could be used with other types as well.  
+  
+**Citations:**  
+  - [Trapnell C, Cacchiarelli D, Grimsby J, Pokharel P, Li S, Morse M, Lennon NJ, Livak KJ, Mikkelsen TS and Rinn JL (2014). “The dynamics and regulators of cell fate decisions are revealed by pseudo-temporal ordering of single cells.” Nature Biotechnology.](http://www.nature.com/nbt/journal/v32/n4/abs/nbt.2859.html)  
+  - [Qiu X, Hill A, Packer J, Lin D, Ma Y and Trapnell C (2017). “Single-cell mRNA quantification and differential analysis with Census.” Nature Methods.](http://www.nature.com/nmeth/journal/v14/n3/abs/nmeth.4150.html)  
+  - [Qiu X, Mao Q, Tang Y, Wang L, Chawla R, Pliner H and Trapnell C (2017). “Reverse graph embedding resolves complex single-cell developmental trajectories.” BioRxiv.](http://biorxiv.org/content/early/2017/02/21/110668)  

@@ -1,13 +1,15 @@
 ---
-title: "LensCleanR for single cell RNA-Seq analysis with monocle"
+title: "LensCleanR"
 output: 
   flexdashboard::flex_dashboard:
     theme: bootstrap
+    orientation: columns
     vertical_layout: fill
 runtime: shiny
 ---
 
 ```{r global, include=FALSE}
+## LensCleanR for single cell RNA-Seq analysis with monocle
 ## Note tibble and bioconductor don't play nicely together
 ## Load data in 'global' chunk so it can be shared by all users of the dashboard
 library(flexdashboard)
@@ -62,7 +64,7 @@ saved_values$cds <- example_hsmm
 ```
 
 
-Load
+Load {data-navmenu="Pre-processing"}
 =====================================  
 
 Sidebar {.sidebar data-width=250}
@@ -288,7 +290,7 @@ dataTableOutput("table_pdata")
 ```
 
 
-Filter
+Filter {data-navmenu="Pre-processing"}
 ===================================== 
 
 ```{r}
@@ -423,7 +425,7 @@ tableOutput("table_mRNA_filtered")
 ```
 
 
-Exploratory
+Exploratory {data-navmenu="Pre-processing"}
 ===================================== 
 
 ```{r}
@@ -582,15 +584,11 @@ verbatimTextOutput("plot_hoverinfo")
 ```
 
 
-Classify and count cells
+Cell-type hierarchy {data-navmenu="Classify"}
 =====================================
 
-Column {.tabset}
--------------------------------------
-
-### Cell-type hierarchy
-
 ```{r eval=FALSE}
+## Classify and count cells
 ## User provides genes that mark a population of cells
   gene1_id <- reactive({
     rownames(subset(fData(cdsFilt), gene_short_name == input$gene1))
@@ -630,7 +628,8 @@ Column {.tabset}
 ```
 
 
-### Unsupervised clustering
+Unsupervised clustering {data-navmenu="Classify"}
+=====================================
 
 ```{r eval=FALSE}
 disp_table <- dispersionTable(cds)
@@ -654,7 +653,8 @@ disp_table <- dispersionTable(cds)
 ```
   
   
-### Semi-supervised clustering
+Semi-supervised clustering {data-navmenu="Classify"}
+=====================================
 
 ```{r eval=FALSE}
 ## Semi-supervised clustering with known gene markers
@@ -682,7 +682,8 @@ marker_diff <- markerDiffTable(cds[expressed_genes, ],
 ```
 
 
-### Impute cell-types
+Impute cell-types {data-navmenu="Classify"}
+=====================================
 
 ```{r eval=FALSE}
   cds <- clusterCells(cds,
@@ -705,13 +706,8 @@ marker_diff <- markerDiffTable(cds[expressed_genes, ],
 ```
 
 
-Single-cell trajectories ("Pseudotime")
+Unsupervised ordering {data-navmenu="Pseudotime"}
 =====================================
-
-Column {.tabset}
--------------------------------------
-
-### Unsupervised ordering
 
 ```{r eval=FALSE}
 reactive({
@@ -750,7 +746,8 @@ observeEvent(input$go_plot_2.1{
 })
 ```
 
-### Ordering with PCA-selected genes
+Ordering with PCA-selected genes {data-navmenu="Pseudotime"}
+=====================================
 
 ```{r eval=FALSE}
 reactive({
@@ -791,7 +788,8 @@ observeEvent({
 })
 ```
 
-### Semi-supervised ordering
+Semi-supervised ordering {data-navmenu="Pseudotime"}
+=====================================
 
 ```{r eval=FALSE}
 ### Semi-supervised ordering with known marker genes
@@ -837,14 +835,39 @@ reactive({
 })
 ```
   
-  
-Differential expression
+Branches {data-navmenu="Pseudotime"}
 =====================================
 
-Column {.tabset}
--------------------------------------
+```{r eval=FALSE}
+dat <- saved_values$cds_filt
   
-### Basic
+renderPlot(plot_cell_trajectory(
+  dat, 
+  color_by = "Time"))
+BEAM_res <- BEAM(dat, branch_point = 1, cores = 1)
+BEAM_res <- BEAM_res[order(BEAM_res$qval), ]
+BEAM_res <- BEAM_res[ , c("gene_short_name", "pval", "qval")]
+  
+## Plot heatmap
+renderPlot(plot_genes_branched_heatmap(
+  dat[rownames(subset(BEAM_res, qval < qval)), ],
+  branch_point = 1,
+  num_clusters = 4,
+  cores = 1,
+  use_gene_short_name = TRUE,
+  show_rownames = TRUE))
+dat_genes <- rownames(subset(fData(dat), gene_short_name %in% genesUser))
+  
+## Plot pseudotime
+renderPlot(plot_genes_branched_pseudotime(
+  dat[dat_genes, ],
+  branch_point = 1,
+  color_by = "Time",
+  ncol = 1))
+```
+
+Basic {data-navmenu="Differential expression"}
+=====================================
 
 ```{r eval=FALSE}
   marker_genes <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
@@ -906,7 +929,8 @@ Column {.tabset}
 ```
   
   
-### Multi-factorial
+Multi-factorial {data-navmenu="Differential expression"}
+=====================================
 
 ```{r eval=FALSE}
   to_be_tested <- rownames(subset(fData(cds), gene_short_name %in% genesUser))
@@ -920,38 +944,6 @@ Column {.tabset}
                                color_by = "CellType", 
                                plot_trend = TRUE) +
                acet_wrap(~feature_label, scales = "free_y"))
-```
-
-
-Trajectory branches
-=====================================
-
-```{r eval=FALSE}
-dat <- saved_values$cds_filt
-  
-renderPlot(plot_cell_trajectory(
-  dat, 
-  color_by = "Time"))
-BEAM_res <- BEAM(dat, branch_point = 1, cores = 1)
-BEAM_res <- BEAM_res[order(BEAM_res$qval), ]
-BEAM_res <- BEAM_res[ , c("gene_short_name", "pval", "qval")]
-  
-## Plot heatmap
-renderPlot(plot_genes_branched_heatmap(
-  dat[rownames(subset(BEAM_res, qval < qval)), ],
-  branch_point = 1,
-  num_clusters = 4,
-  cores = 1,
-  use_gene_short_name = TRUE,
-  show_rownames = TRUE))
-dat_genes <- rownames(subset(fData(dat), gene_short_name %in% genesUser))
-  
-## Plot pseudotime
-renderPlot(plot_genes_branched_pseudotime(
-  dat[dat_genes, ],
-  branch_point = 1,
-  color_by = "Time",
-  ncol = 1))
 ```
 
 
